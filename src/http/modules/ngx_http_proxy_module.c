@@ -297,7 +297,11 @@ ngx_module_t  ngx_http_proxy_module;
 static ngx_command_t  ngx_http_proxy_commands[] = {
 
     { ngx_string("proxy_pass"),
+#if NGX_HTTP_PROXY_THRU
+      NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF|NGX_HTTP_LMT_CONF|NGX_CONF_TAKE12,
+#else
       NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF|NGX_HTTP_LMT_CONF|NGX_CONF_TAKE1,
+#endif
       ngx_http_proxy_pass,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -4194,7 +4198,17 @@ ngx_http_proxy_pass(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     u.uri_part = 1;
     u.no_resolve = 1;
 
-    plcf->upstream.upstream = ngx_http_upstream_add(cf, &u, 0);
+#if NGX_HTTP_PROXY_THRU
+    ngx_str_t* pparg = ((ngx_str_t*) cf->args->elts+2);
+    if (cf->args->nelts > 1 && pparg->len == 10 && ngx_strncmp(pparg->data, "proxy_thru", 10) == 0) {
+        plcf->upstream.upstream = ngx_http_upstream_add(cf, &u, NGX_HTTP_UPSTREAM_PROXY_THRU);
+    } else {
+#endif
+        plcf->upstream.upstream = ngx_http_upstream_add(cf, &u, 0);
+#if NGX_HTTP_PROXY_THRU
+    }
+#endif
+
     if (plcf->upstream.upstream == NULL) {
         return NGX_CONF_ERROR;
     }

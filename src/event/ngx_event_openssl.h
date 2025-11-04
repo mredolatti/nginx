@@ -85,6 +85,7 @@
 
 typedef struct ngx_ssl_ocsp_s  ngx_ssl_ocsp_t;
 
+struct ngx_ssl_ntls_s;
 
 struct ngx_ssl_s {
     SSL_CTX                    *ctx;
@@ -128,6 +129,10 @@ struct ngx_ssl_connection_s {
     unsigned                    in_ocsp:1;
     unsigned                    early_preread:1;
     unsigned                    write_blocked:1;
+
+#if (NGX_HTTP_PROXY_THRU)
+    struct ngx_ssl_ntls_s* ntls;
+#endif
 };
 
 
@@ -336,4 +341,52 @@ extern int  ngx_ssl_certificate_name_index;
 extern int  ngx_ssl_stapling_index;
 
 
+#if (NGX_HTTP_PROXY_THRU)
+
+
+
+typedef struct ngx_ssl_ntls_s {
+    ngx_pool_t* pool;
+    SSL_CTX* ssl_ctx;
+    SSL* inner;
+    SSL* outer;
+    BIO* rbio;
+    BIO* wbio;
+    struct ngx_ssl_ntls_async_context_s* async;
+} ngx_ssl_ntls_t;
+
+typedef struct ngx_ssl_ntls_async_context_s {
+    ngx_ssl_ntls_t* ntls;
+    void* original_context;
+    ngx_connection_handler_pt callback;
+    // TODO(mredolatti) COMPLETION HANDLER PROPERTY
+    struct partial_write_s {
+        // whether we're in the progress of writing
+        int in_progress;
+        // total size of the current write operation
+        int write_size;
+        // pointer to the write-from buffer that should be received in the next call.
+        // this represents the amount of data that was flushed thrugh the sink/socket, which most likely
+        // differs from the amount of data encrypted in TLS records and stored in the buffer ready to be sent.
+        const char* write_expected_next_buf;
+        // this re
+        size_t offset;
+        size_t buffered;
+    } partial_write;
+} ngx_ssl_ntls_async_context_t;
+
+int ngx_ssl_ntls_init(ngx_connection_t* conn);
+int ngx_ssl_ntls_do_handshake(ngx_connection_t* conn, ngx_connection_handler_pt callback);
+int ngx_ssl_ntls_read(ngx_ssl_ntls_t* ntls, const char* buffer, size_t size);
+int ngx_ssl_ntls_write(ngx_ssl_ntls_t* ntls, const char* buffer, size_t size);
+int ngx_ssl_ntls_async_do_handshake(ngx_ssl_ntls_t* ntls, ngx_connection_t* conn, void* original_handler);
+int ngx_ssl_ntls_async_write(ngx_ssl_ntls_t* ntls, const char* buffer, size_t size);
+int ngx_ssl_ntls_async_read(ngx_ssl_ntls_t* ntls, u_char* buffer, size_t size);
+
+
+#endif
+
 #endif /* _NGX_EVENT_OPENSSL_H_INCLUDED_ */
+
+
+

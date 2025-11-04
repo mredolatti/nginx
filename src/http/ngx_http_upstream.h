@@ -116,6 +116,9 @@ typedef struct {
 #define NGX_HTTP_UPSTREAM_DOWN          0x0010
 #define NGX_HTTP_UPSTREAM_BACKUP        0x0020
 #define NGX_HTTP_UPSTREAM_MAX_CONNS     0x0100
+#if NGX_HTTP_PROXY_THRU
+#define NGX_HTTP_UPSTREAM_PROXY_THRU    0x2000
+#endif
 
 
 struct ngx_http_upstream_srv_conf_s {
@@ -130,6 +133,22 @@ struct ngx_http_upstream_srv_conf_s {
     ngx_uint_t                       line;
     in_port_t                        port;
     ngx_uint_t                       no_port;  /* unsigned no_port:1 */
+
+#if NGX_HTTP_PROXY_THRU
+    // upstream setup & configuration happens BEFORE proxy_thru configuration option (both at server & loc level).
+    // this poses a series of problems:
+    //  1. upstreams need to be reconfigured in a `merge_loc` function after the whole config has been parsed, and
+    //      they belong to a root/main level config. If we want to reconfigure the upstream to use our
+    //      proxy_thru behavior, we have no way to tell which upstream is used in each server/location config.
+    //  2. when using `proxy_thru` directive, DNS resolution of target hosts (mentioned in proxy_pass
+    //      in contexts where proxy_thru is enabled) is not necessary.
+    //      Those DNS queries happen synchronously in the master process at very early stages
+    //      before proxy thru is even loaded. While they're mostly harmless, it's possible that in some contexts,
+    //      the outgoing proxy is the ONLY gateway to the internet, and DNS resolution of those hosts cannot be
+    //      done by the same resolver that handles the proxy address. To work around those scenarios, if
+    //      `proxy_thru` option is passed to `proxy_pass` directives. early DNS resolution is skipped.
+    ngx_uint_t                       proxy_thru;
+#endif
 
 #if (NGX_HTTP_UPSTREAM_ZONE)
     ngx_shm_zone_t                  *shm_zone;
