@@ -1797,6 +1797,7 @@ ngx_ssl_set_session(ngx_connection_t *c, ngx_ssl_session_t *session)
 ngx_int_t
 ngx_ssl_handshake(ngx_connection_t *c)
 {
+    printf("inner l handshake\n");
     int        n, sslerr;
     ngx_err_t  err;
     ngx_int_t  rc;
@@ -6077,8 +6078,10 @@ ngx_openssl_exit(ngx_cycle_t *cycle)
 #define NGX_SSL_NTLS_OP_RES_SSL_ERR 2
 
 #define NGX_SSL_NTLS_OP_UNRECOVERABLE(x) \
-    x.type == NGX_SSL_NTLS_OP_RES_SYS_ERR \
-    || (x.type == NGX_SSL_NTLS_OP_RES_SSL_ERR && x.value != SSL_ERROR_WANT_READ && x.value != SSL_ERROR_WANT_WRITE)
+    x.type == NGX_SSL_NTLS_OP_RES_SYS_ERR || (x.type == NGX_SSL_NTLS_OP_RES_SSL_ERR \
+        && x.value != SSL_ERROR_WANT_READ \
+        && x.value != SSL_ERROR_WANT_WRITE \
+        && x.value != SSL_ERROR_ZERO_RETURN)
 
 #define NGX_SSL_NTLS_RES_UNRECOVERABLE(x) \
     NGX_SSL_NTLS_OP_UNRECOVERABLE(x.read) || NGX_SSL_NTLS_OP_UNRECOVERABLE(x.write)
@@ -6109,6 +6112,8 @@ static ngx_ssl_ntls_op_res_t  ngx_ssl_flush_write_bio(ngx_connection_t* conn);
 static void ngx_ssl_ntls_async_rw(ngx_connection_t* conn, ngx_ssl_ntls_rw_result_t* result);
 static int ngx_ssl_ntls_handshake_handler(ngx_connection_t* conn);
 static void ngx_ssl_ntls_ev_handshake_handler(ngx_event_t *ev);
+ngx_chain_t* ngx_ssl_ntls_send_chain(ngx_connection_t *c, ngx_chain_t *in, off_t limit);
+ssize_t ngx_ssl_ntls_recv_chain(ngx_connection_t *c, ngx_chain_t *cl, off_t limit);
 
 
 int ngx_ssl_ntls_init(ngx_connection_t* conn)
@@ -6163,6 +6168,106 @@ int ngx_ssl_ntls_do_handshake(ngx_connection_t* conn, ngx_connection_handler_pt 
     return ngx_ssl_ntls_handshake_handler(conn);
 }
 
+ssize_t ngx_ssl_ntls_write(ngx_connection_t* conn, u_char* data, size_t size)
+{
+    if (conn->ssl->ntls->async->partial_write.write_expected_next_buf != NULL) {
+        // TODO!
+        //assert(data == conn->ssl->ntls->async->partial_write.write_expected_next_buf);
+    } else {
+        size_t written = SSL_write(conn->ssl->ntls->outer, data, size);
+        // TODO: handle possible error due to unavailable mem?
+        // https://docs.openssl.org/1.1.1/man3/BIO_s_mem/#notes
+        //assert(written == size);
+        (void)written;
+    }
+
+    ngx_ssl_ntls_rw_result_t res;
+    do {
+        ngx_ssl_ntls_async_rw(conn, &res);
+    } while (res.write.type == NGX_SSL_NTLS_OP_RES_OK && res.write.value > 0);
+
+    if (NGX_SSL_NTLS_RES_UNRECOVERABLE(res)) {
+        // TODO(mredolatti): handle properly
+        return NGX_ERROR;
+    }
+
+    // inner tls/socket needs i/o
+    if (NGX_SSL_NTLS_RES_NEEDS_IO(res)) {
+        conn->ssl->ntls->async->partial_write.write_expected_next_buf = data;
+        return NGX_AGAIN;
+    }
+
+    // write completed
+    conn->ssl->ntls->async->partial_write.write_expected_next_buf = NULL;
+    return size;
+}
+
+ssize_t ngx_ssl_ntls_read(ngx_connection_t* conn, u_char* buffer, size_t size)
+{
+    ngx_ssl_ntls_rw_result_t res;
+    ngx_ssl_ntls_async_rw(conn, &res);
+    if (NGX_SSL_NTLS_RES_UNRECOVERABLE(res)) {
+        printf("UNRECOVERABLE: read=%d write=%d\n", res.read.value, res.write.value);
+        // TODO(mredolatti): handle properly
+        return NGX_ERROR;
+    }
+
+    // inner tls/socket needs i/o
+    if (NGX_SSL_NTLS_RES_NEEDS_IO(res)) {
+        return NGX_AGAIN;
+    }
+
+    int written = SSL_read(conn->ssl->ntls->outer, (void*)buffer, size);
+    if (written < 0) {
+        int ssl_err = SSL_get_error(conn->ssl->ntls->outer, written);
+        switch (ssl_err) {
+            case SSL_ERROR_ZERO_RETURN:
+                return 0; // EOF
+            case SSL_ERROR_WANT_READ:
+            case SSL_ERROR_WANT_WRITE:
+                return NGX_AGAIN;
+            default:
+                // TODO(mredolatti): log info on error.
+        printf("UNKNOWN ERR: %d -- written = %d\n", ssl_err, written);
+                return NGX_ERROR;
+        }
+    }
+
+    return written;
+}
+
+static int ngx_ssl_ntls_handshake_handler(ngx_connection_t* conn)
+{
+    for (;;) {
+        int rc = SSL_do_handshake(conn->ssl->ntls->outer);
+        if (rc == 1) {
+            conn->recv = ngx_ssl_ntls_read;
+            conn->send = ngx_ssl_ntls_write;
+            conn->recv_chain = ngx_ssl_ntls_recv_chain;
+            conn->send_chain = ngx_ssl_ntls_send_chain;
+            return NGX_OK;
+        }
+
+        int handshake_err = SSL_get_error(conn->ssl->ntls->outer, rc);
+        if (!(handshake_err == SSL_ERROR_WANT_READ || handshake_err == SSL_ERROR_WANT_WRITE)) {
+            return NGX_ERROR;
+        }
+
+        // requires data i/o
+        ngx_ssl_ntls_rw_result_t res;
+        ngx_ssl_ntls_async_rw(conn, &res);
+        if (NGX_SSL_NTLS_RES_UNRECOVERABLE(res)) {
+            // TODO(mredolatti): handle properly
+            return NGX_ERROR;
+        }
+
+        // inner tls/socket needs i/o
+        if (NGX_SSL_NTLS_RES_NEEDS_IO(res)) {
+            return NGX_AGAIN;
+        }
+    }
+}
+
 static void ngx_ssl_ntls_ev_handshake_handler(ngx_event_t *ev)
 {
     ngx_connection_t  *c;
@@ -6181,40 +6286,7 @@ static void ngx_ssl_ntls_ev_handshake_handler(ngx_event_t *ev)
         return;
     }
 
-    c->ssl->handler(c);
-}
-
-
-static int ngx_ssl_ntls_handshake_handler(ngx_connection_t* conn)
-{
-    for (;;) {
-        int rc = SSL_do_handshake(conn->ssl->ntls->outer);
-        if (rc == 1) {
-            printf("AAAAAAAAAAAAAAA\n");
-            return NGX_OK;
-            //bctx->context = ctx->original_context;
-            //bctx->handler = ctx->completion_handler;
-            //return bctx->handler(fd, HRNS_EVLOOP_FD_STATUS_WRITABLE, bctx);
-        }
-
-        int handshake_err = SSL_get_error(conn->ssl->ntls->outer, rc);
-        if (!(handshake_err == SSL_ERROR_WANT_READ || handshake_err == SSL_ERROR_WANT_WRITE)) {
-            return handshake_err;
-        }
-
-        // requires data i/o
-        ngx_ssl_ntls_rw_result_t res;
-        ngx_ssl_ntls_async_rw(conn, &res);
-        if (NGX_SSL_NTLS_RES_UNRECOVERABLE(res)) {
-            // TODO(mredolatti): handle properly
-            return NGX_ERROR;
-        }
-
-        // inner tls/socket needs i/o
-        if (NGX_SSL_NTLS_RES_NEEDS_IO(res)) {
-            return NGX_AGAIN;
-        }
-    }
+    c->ssl->ntls->async->callback(c);
 }
 
 static void ngx_ssl_ntls_async_rw(ngx_connection_t* conn, ngx_ssl_ntls_rw_result_t* result)
@@ -6257,7 +6329,7 @@ static ngx_ssl_ntls_op_res_t ngx_ssl_ntls_hydrate_read_bio(ngx_connection_t* con
         return result;
     }
 
-    if (BIO_write(conn->ssl->ntls->rbio, buffer, n) == n) {
+    if (BIO_write(conn->ssl->ntls->rbio, buffer, n) != n) {
         // TODO(mredolatti): handle properly
         abort();
     }
@@ -6301,6 +6373,99 @@ static ngx_ssl_ntls_op_res_t ngx_ssl_flush_write_bio(ngx_connection_t* conn)
     result.type = NGX_SSL_NTLS_OP_RES_OK;
     result.value = flushed;
     return result;
+}
+
+ssize_t
+ngx_ssl_ntls_recv_chain(ngx_connection_t *c, ngx_chain_t *cl, off_t limit)
+{
+    u_char     *last;
+    ssize_t     n, bytes, size;
+    ngx_buf_t  *b;
+
+    bytes = 0;
+
+    b = cl->buf;
+    last = b->last;
+
+    for ( ;; ) {
+        size = b->end - last;
+
+        if (limit) {
+            if (bytes >= limit) {
+                return bytes;
+            }
+
+            if (bytes + size > limit) {
+                size = (ssize_t) (limit - bytes);
+            }
+        }
+
+        n = ngx_ssl_ntls_read(c, last, size);
+
+        if (n > 0) {
+            last += n;
+            bytes += n;
+
+            if (!c->read->ready) {
+                return bytes;
+            }
+
+            if (last == b->end) {
+                cl = cl->next;
+
+                if (cl == NULL) {
+                    return bytes;
+                }
+
+                b = cl->buf;
+                last = b->last;
+            }
+
+            continue;
+        }
+
+        if (bytes) {
+
+            if (n == 0 || n == NGX_ERROR) {
+                c->read->ready = 1;
+            }
+
+            return bytes;
+        }
+
+        return n;
+    }
+}
+
+
+ngx_chain_t *
+ngx_ssl_ntls_send_chain(ngx_connection_t *c, ngx_chain_t *in, off_t limit)
+{
+
+    // this is a naive implementation that will copy all the buffers' data into an OpenSSL BIO,
+    // and retry the send  with the same memory address as the data buffer
+    // until all data has been successfully written.
+    // There's room for improvement in terns of memory allocations:
+    // - single buffer discarding as partial data is successfully sent should reduce the amount of memory used.
+    // - use of buffer chains for output data instead of openSSL BIOs, whose
+    //   internal memory allocation mechanism isn't trivial to integrate with nginx's pooling facilities
+    while (in) {
+        int n = ngx_ssl_ntls_write(c, in->buf->pos, in->buf->last - in->buf->pos);
+        if (n == NGX_ERROR) {
+            return NGX_CHAIN_ERROR;
+        }
+
+        if (n == NGX_AGAIN) {
+            return in;
+        }
+
+        in->buf->pos += n;
+        if (in->buf->pos == in->buf->last) {
+            in = in->next;
+        }
+    }
+
+    return in;
 }
 
 #endif

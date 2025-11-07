@@ -2208,6 +2208,7 @@ static void ngx_http_upstream_conn_established_handler(ngx_http_request_t *r,
       .cb = ngx_http_upstream_tunnel_established_handler,
       .host = r->upstream->upstream->host,
       .port = r->upstream->upstream->port,
+      .ssl = 1, // TODO(mredolatti): pass proper value here
   };
   ngx_http_proxy_thru_handshake(r, &u->peer, &opts);
 }
@@ -2219,9 +2220,6 @@ static void ngx_http_upstream_tunnel_established_handler(ngx_http_request_t *r,
     // TODO(mredolatti)
     abort();
   }
-
-  // TODO(mredolatti):
-  // if upstream is https, setup a TLS tunnel to it
 
   r->upstream->peer.connection->read->handler = ngx_http_upstream_handler;
   r->upstream->peer.connection->write->handler = ngx_http_upstream_handler;
@@ -2246,21 +2244,32 @@ static void ngx_http_upstream_send_request_handler(ngx_http_request_t *r,
   }
 
 #if (NGX_HTTP_SSL)
-  if (u->ssl && c->ssl == NULL) {
+  if (u->ssl) {
 #if NGX_HTTP_PROXY_THRU
-    if (/* has proxy thru and next proxy is also TLS*/ 1) {
-        // TODO(mredolatti): setup ntls
+    if (/* TODO(mredolatti): we're connected to a TLS proxy and the upstream also has a TLS frontend*/ 1 && c->ssl->ntls == NULL) {
+      ngx_ssl_ntls_init(c);
+      int handshake_res = ngx_ssl_ntls_do_handshake(c, ngx_http_ntls_callback);
+      switch (handshake_res) {
+        case NGX_OK:
+          printf("handshake OK!...\n");
+          break;
+        case NGX_AGAIN:
+          printf("handshake incompleto...\n");
+          return;
+        default:
+          // TODO!
+          abort();
+      }
     } else {
-#endif
+#else
+      if (c->ssl == NULL) {
         ngx_http_upstream_ssl_init_connection(r, u, c);
+      }
+#endif
 #if NGX_HTTP_PROXY_THRU
     }
 #endif
-
-    return;
   }
-
-
 #endif
 
   if (u->header_sent && !u->conf->preserve_output) {
@@ -6595,7 +6604,14 @@ int ngx_http_upstream_setup_ntls(ngx_connection_t *conn) { return NGX_OK; }
 
 void ngx_http_ntls_callback(ngx_connection_t* conn)
 {
-    printf("YEAHHH\n");
+  printf("OUTER HANDSHAKE COMPLETE\n");
+  ngx_http_request_t *request = conn->data;
+  ngx_http_upstream_t *upstream = request->upstream;
+  conn->read->handler = ngx_http_upstream_handler;
+  conn->write->handler = ngx_http_upstream_handler;
+  upstream->read_event_handler = ngx_http_upstream_process_header;
+  upstream->write_event_handler = ngx_http_upstream_send_request_handler;
+  ngx_http_upstream_send_request_handler(request, upstream);
 }
 
 

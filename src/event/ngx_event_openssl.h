@@ -368,7 +368,7 @@ typedef struct ngx_ssl_ntls_async_context_s {
         // pointer to the write-from buffer that should be received in the next call.
         // this represents the amount of data that was flushed thrugh the sink/socket, which most likely
         // differs from the amount of data encrypted in TLS records and stored in the buffer ready to be sent.
-        const char* write_expected_next_buf;
+        u_char* write_expected_next_buf;
         // this re
         size_t offset;
         size_t buffered;
@@ -377,11 +377,8 @@ typedef struct ngx_ssl_ntls_async_context_s {
 
 int ngx_ssl_ntls_init(ngx_connection_t* conn);
 int ngx_ssl_ntls_do_handshake(ngx_connection_t* conn, ngx_connection_handler_pt callback);
-int ngx_ssl_ntls_read(ngx_ssl_ntls_t* ntls, const char* buffer, size_t size);
-int ngx_ssl_ntls_write(ngx_ssl_ntls_t* ntls, const char* buffer, size_t size);
-int ngx_ssl_ntls_async_do_handshake(ngx_ssl_ntls_t* ntls, ngx_connection_t* conn, void* original_handler);
-int ngx_ssl_ntls_async_write(ngx_ssl_ntls_t* ntls, const char* buffer, size_t size);
-int ngx_ssl_ntls_async_read(ngx_ssl_ntls_t* ntls, u_char* buffer, size_t size);
+ssize_t ngx_ssl_ntls_write(ngx_connection_t* conn, u_char* data, size_t size);
+ssize_t ngx_ssl_ntls_read(ngx_connection_t* conn, u_char* buffer, size_t size);
 
 
 #endif
