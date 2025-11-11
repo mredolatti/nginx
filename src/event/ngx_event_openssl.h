@@ -379,6 +379,7 @@ int ngx_ssl_ntls_init(ngx_connection_t* conn);
 int ngx_ssl_ntls_do_handshake(ngx_connection_t* conn, ngx_connection_handler_pt callback);
 ssize_t ngx_ssl_ntls_write(ngx_connection_t* conn, u_char* data, size_t size);
 ssize_t ngx_ssl_ntls_read(ngx_connection_t* conn, u_char* buffer, size_t size);
+ngx_int_t ngx_ssl_ntls_shutdown(ngx_connection_t *c);
 
 
 #endif

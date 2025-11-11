@@ -4269,17 +4269,14 @@ static void ngx_http_upstream_next(ngx_http_request_t *r,
     if (u->peer.connection->ssl) {
 #if NGX_HTTP_PROXY_THRU
         if (/* has proxy thru and next proxy is also TLS*/ 1) {
-            // TODO(mredolatti): shutdown ntls
-        } else {
-#endif
-          u->peer.connection->ssl->no_wait_shutdown = 1;
-          u->peer.connection->ssl->no_send_shutdown = 1;
-          (void)ngx_ssl_shutdown(u->peer.connection);
-#if NGX_HTTP_PROXY_THRU
+            ngx_ssl_ntls_shutdown(u->peer.connection);
         }
 #endif
-    }
+        u->peer.connection->ssl->no_wait_shutdown = 1;
+        u->peer.connection->ssl->no_send_shutdown = 1;
+        (void)ngx_ssl_shutdown(u->peer.connection);
 #endif
+    }
 
     if (u->peer.connection->pool) {
       ngx_destroy_pool(u->peer.connection->pool);
@@ -4351,8 +4348,7 @@ static void ngx_http_upstream_finalize_request(ngx_http_request_t *r,
     if (u->peer.connection->ssl) {
 #if NGX_HTTP_PROXY_THRU
         if (/* has proxy thru and next proxy is also TLS*/ 1) {
-            // TODO(mredolatti): shut down ntls
-        } else {
+            ngx_ssl_ntls_shutdown(u->peer.connection);
 #endif
           /*
            * We send the "close notify" shutdown alert to the upstream only
@@ -4361,9 +4357,7 @@ static void ngx_http_upstream_finalize_request(ngx_http_request_t *r,
            */
           u->peer.connection->ssl->no_wait_shutdown = 1;
           (void)ngx_ssl_shutdown(u->peer.connection);
-#if NGX_HTTP_PROXY_THRU
         }
-#endif
     }
 #endif
 

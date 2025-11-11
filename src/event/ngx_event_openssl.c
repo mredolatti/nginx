@@ -6112,6 +6112,9 @@ static ngx_ssl_ntls_op_res_t  ngx_ssl_flush_write_bio(ngx_connection_t* conn);
 static void ngx_ssl_ntls_async_rw(ngx_connection_t* conn, ngx_ssl_ntls_rw_result_t* result);
 static int ngx_ssl_ntls_handshake_handler(ngx_connection_t* conn);
 static void ngx_ssl_ntls_ev_handshake_handler(ngx_event_t *ev);
+static void ngx_ssl_ntls_shutdown_handler(ngx_event_t *ev);
+
+// mover al h
 ngx_chain_t* ngx_ssl_ntls_send_chain(ngx_connection_t *c, ngx_chain_t *in, off_t limit);
 ssize_t ngx_ssl_ntls_recv_chain(ngx_connection_t *c, ngx_chain_t *cl, off_t limit);
 
@@ -6467,5 +6470,164 @@ ngx_ssl_ntls_send_chain(ngx_connection_t *c, ngx_chain_t *in, off_t limit)
 
     return in;
 }
+
+ngx_int_t ngx_ssl_ntls_shutdown(ngx_connection_t *c)
+{
+    int         n, sslerr, mode;
+    ngx_int_t   rc;
+    ngx_err_t   err;
+    ngx_uint_t  tries;
+
+#if (NGX_QUIC)
+    if (c->quic) {
+        // TODO(mredolatti): validate this
+        // QUIC streams inherit SSL object
+        return NGX_OK;
+    }
+#endif
+
+    rc = NGX_OK;
+
+    if (SSL_in_init(c->ssl->ntls->outer)) {
+        /*
+         * OpenSSL 1.0.2f complains if SSL_shutdown() is called during
+         * an SSL handshake, while previous versions always return 0.
+         * Avoid calling SSL_shutdown() if handshake wasn't completed.
+         */
+
+        goto done;
+    }
+
+    if (c->timedout || c->error || c->buffered) {
+        mode = SSL_RECEIVED_SHUTDOWN|SSL_SENT_SHUTDOWN;
+        SSL_set_quiet_shutdown(c->ssl->ntls->outer, 1);
+    } else {
+        mode = SSL_get_shutdown(c->ssl->ntls->outer);
+
+        // TODO(mredolatti): check if worth implementing this for ntls
+        //if (c->ssl->no_wait_shutdown) {
+        //    mode |= SSL_RECEIVED_SHUTDOWN;
+        //}
+
+        //if (c->ssl->no_send_shutdown) {
+        //    mode |= SSL_SENT_SHUTDOWN;
+        //}
+
+        //if (c->ssl->no_wait_shutdown && c->ssl->no_send_shutdown) {
+        //    SSL_set_quiet_shutdown(c->ssl->connection, 1);
+        //}
+    }
+
+    SSL_set_shutdown(c->ssl->ntls->outer, mode);
+
+    ngx_ssl_clear_error(c->log);
+
+    tries = 2;
+
+    for ( ;; ) {
+
+        /*
+         * For bidirectional shutdown, SSL_shutdown() needs to be called
+         * twice: first call sends the "close notify" alert and returns 0,
+         * second call waits for the peer's "close notify" alert.
+         */
+
+        n = SSL_shutdown(c->ssl->ntls->outer);
+
+        ngx_log_debug1(NGX_LOG_DEBUG_EVENT, c->log, 0, "SSL_shutdown: %d", n);
+
+        if (n == 1) {
+            goto done;
+        }
+
+        if (n == 0 && tries-- > 1) {
+            continue;
+        }
+
+        /* before 0.9.8m SSL_shutdown() returned 0 instead of -1 on errors */
+
+        sslerr = SSL_get_error(c->ssl->ntls->outer, n);
+
+        ngx_log_debug1(NGX_LOG_DEBUG_EVENT, c->log, 0,
+                       "SSL_get_error: %d", sslerr);
+
+        if (sslerr == SSL_ERROR_WANT_READ || sslerr == SSL_ERROR_WANT_WRITE) {
+            c->read->handler = ngx_ssl_ntls_shutdown_handler;
+            c->write->handler = ngx_ssl_ntls_shutdown_handler;
+
+            if (sslerr == SSL_ERROR_WANT_READ) {
+                c->read->ready = 0;
+
+            } else {
+                c->write->ready = 0;
+            }
+
+            if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
+                goto failed;
+            }
+
+            if (ngx_handle_write_event(c->write, 0) != NGX_OK) {
+                goto failed;
+            }
+
+            ngx_add_timer(c->read, 3000);
+
+            return NGX_AGAIN;
+        }
+
+        if (sslerr == SSL_ERROR_ZERO_RETURN || ERR_peek_error() == 0) {
+            goto done;
+        }
+
+        err = (sslerr == SSL_ERROR_SYSCALL) ? ngx_errno : 0;
+
+        ngx_ssl_connection_error(c, sslerr, err, "ntls/SSL_shutdown() failed");
+
+        break;
+    }
+
+failed:
+
+    rc = NGX_ERROR;
+
+done:
+
+    if (c->ssl->shutdown_without_free) {
+        // TODO?
+        //c->ssl->shutdown_without_free = 0;
+        //c->recv = ngx_ssl_recv;
+        //return rc;
+    }
+
+    printf("\nLIMPIO TODO\n");
+    SSL_free(c->ssl->ntls->outer);
+    c->recv = ngx_ssl_recv;
+
+    return rc;
+}
+
+static void ngx_ssl_ntls_shutdown_handler(ngx_event_t *ev)
+{
+    ngx_connection_t           *c;
+    ngx_connection_handler_pt   handler;
+
+    c = ev->data;
+    handler = c->ssl->handler;
+
+    if (ev->timedout) {
+        c->timedout = 1;
+    }
+
+    ngx_log_debug0(NGX_LOG_DEBUG_EVENT, ev->log, 0, "SSL shutdown handler");
+
+    if (ngx_ssl_ntls_shutdown(c) == NGX_AGAIN) {
+        return;
+    }
+
+    handler(c);
+}
+
+
+
 
 #endif
