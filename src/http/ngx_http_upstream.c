@@ -1589,23 +1589,34 @@ static void ngx_http_upstream_connect(ngx_http_request_t *r,
   }
 
 #if (NGX_HTTP_SSL)
-  if (u->ssl && c->ssl == NULL) {
+  if (u->ssl) {
 #if NGX_HTTP_PROXY_THRU
-    if (/* has proxy thru and next proxy is also TLS*/ 1) {
-        // TODO(mredolatti): setup ntls
-        ngx_ssl_ntls_init(c);
-        if (ngx_ssl_ntls_do_handshake(c, ngx_http_ntls_callback) == NGX_ERROR) {
-            // TODO
-        }
+
+    ngx_http_proxy_thru_loc_conf_t *ptpclcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_thru_module);
+    if (ptpclcf->url.url.len > 0 && ptpclcf->fields.ssl_enable && c->ssl->ntls == NULL) {
+      // we're going thru a forward proxy which has a TLS frontend, and we need to connect to a TLS upstream
+      ngx_ssl_ntls_init(c);
+      int handshake_res = ngx_ssl_ntls_do_handshake(c, ngx_http_ntls_callback);
+      switch (handshake_res) {
+        case NGX_OK:
+          printf("handshake OK!...\n");
+          break;
+        case NGX_AGAIN:
+          printf("handshake incompleto...\n");
+          return;
+        default:
+          // TODO!
+          abort();
+      }
     } else {
 #endif
+      if (c->ssl == NULL) {
         ngx_http_upstream_ssl_init_connection(r, u, c);
+      }
 #if NGX_HTTP_PROXY_THRU
     }
 #endif
-    return;
   }
-
 #endif
 
   ngx_http_upstream_send_request(r, u, 1);
@@ -2204,11 +2215,11 @@ static void ngx_http_upstream_conn_established_handler(ngx_http_request_t *r,
     return;
   }
 
+
   ngx_http_proxy_thru_options_t opts = {
       .cb = ngx_http_upstream_tunnel_established_handler,
       .host = r->upstream->upstream->host,
       .port = r->upstream->upstream->port,
-      .ssl = 1, // TODO(mredolatti): pass proper value here
   };
   ngx_http_proxy_thru_handshake(r, &u->peer, &opts);
 }
@@ -2246,7 +2257,10 @@ static void ngx_http_upstream_send_request_handler(ngx_http_request_t *r,
 #if (NGX_HTTP_SSL)
   if (u->ssl) {
 #if NGX_HTTP_PROXY_THRU
-    if (/* TODO(mredolatti): we're connected to a TLS proxy and the upstream also has a TLS frontend*/ 1 && c->ssl->ntls == NULL) {
+
+    ngx_http_proxy_thru_loc_conf_t *ptpclcf = ngx_http_get_module_loc_conf(r, ngx_http_proxy_thru_module);
+    if (ptpclcf->url.url.len > 0 && ptpclcf->fields.ssl_enable && c->ssl->ntls == NULL) {
+      // we're going thru a forward proxy which has a TLS frontend, and we need to connect to a TLS upstream
       ngx_ssl_ntls_init(c);
       int handshake_res = ngx_ssl_ntls_do_handshake(c, ngx_http_ntls_callback);
       switch (handshake_res) {
@@ -2261,11 +2275,10 @@ static void ngx_http_upstream_send_request_handler(ngx_http_request_t *r,
           abort();
       }
     } else {
-#else
+#endif
       if (c->ssl == NULL) {
         ngx_http_upstream_ssl_init_connection(r, u, c);
       }
-#endif
 #if NGX_HTTP_PROXY_THRU
     }
 #endif
@@ -6540,61 +6553,6 @@ static char *ngx_http_upstream_merge_loc_conf(ngx_conf_t *cf, void *parent,
 // CRAPBOX
 
 #if (NGX_HTTP_PROXY_THRU &&  NGX_HTTP_SSL)
-
-int ngx_http_upstream_setup_ntls(ngx_connection_t *conn) { return NGX_OK; }
-
-//static void ngx_http_upstream_ntls_init_connection(ngx_http_request_t *r,
-//                                                  ngx_http_upstream_t *u,
-//                                                  ngx_connection_t *c) {
-//  ngx_int_t rc;
-//  ngx_http_core_loc_conf_t *clcf;
-//
-//  if (ngx_http_upstream_test_connect(c) != NGX_OK) {
-//    ngx_http_upstream_next(r, u, NGX_HTTP_UPSTREAM_FT_ERROR);
-//    return;
-//  }
-//
-//  if (ngx_ssl_create_connection(u->conf->ssl, c,
-//                                NGX_SSL_BUFFER | NGX_SSL_CLIENT) != NGX_OK) {
-//    ngx_http_upstream_finalize_request(r, u, NGX_HTTP_INTERNAL_SERVER_ERROR);
-//    return;
-//  }
-//
-//  if (u->conf->ssl_server_name || u->conf->ssl_verify) {
-//    if (ngx_http_upstream_ssl_name(r, u, c) != NGX_OK) {
-//      ngx_http_upstream_finalize_request(r, u, NGX_HTTP_INTERNAL_SERVER_ERROR);
-//      return;
-//    }
-//  }
-//
-//  if (u->conf->ssl_certificate && u->conf->ssl_certificate->value.len &&
-//      (u->conf->ssl_certificate->lengths ||
-//       u->conf->ssl_certificate_key->lengths)) {
-//    if (ngx_http_upstream_ssl_certificate(r, u, c) != NGX_OK) {
-//      ngx_http_upstream_finalize_request(r, u, NGX_HTTP_INTERNAL_SERVER_ERROR);
-//      return;
-//    }
-//  }
-//
-//  // TODO(mredolatti): handle ssl session saving & resuming
-//
-//  r->connection->log->action = "SSL handshaking to upstream";
-//
-//  rc = ngx_ssl_handshake(c);
-//
-//  if (rc == NGX_AGAIN) {
-//
-//    if (!c->write->timer_set) {
-//      ngx_add_timer(c->write, u->conf->connect_timeout);
-//    }
-//
-//    c->ssl->handler = ngx_http_upstream_ssl_handshake_handler;
-//    return;
-//  }
-//
-//  ngx_http_upstream_ssl_handshake(r, u, c);
-//}
-
 
 void ngx_http_ntls_callback(ngx_connection_t* conn)
 {
